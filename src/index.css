@@ -1,0 +1,24 @@
+:root {
+  color-scheme: dark;
+  font: 14px/1.4 ui-monospace, SFMono-Regular, Consolas, monospace;
+  --hud-bg: rgba(20, 22, 28, 0.7);
+  --hud-text: #cdd3dc;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  margin: 0;
+  width: 100%;
+  height: 100%;
+}
+
+html,
+body {
+  overflow: hidden;
+  background: #0d0e12;
+}
