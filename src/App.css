@@ -95,7 +95,7 @@
 
 .sidebar {
   flex: none;
-  width: 240px;
+  width: 300px;
   height: 100%;
   padding: 20px 24px;
   display: flex;
@@ -218,6 +218,62 @@
 
 .toggle input:disabled {
   cursor: not-allowed;
+}
+
+.tool-group {
+  margin-top: 12px;
+  padding: 10px 12px;
+  border: 1px solid rgba(255, 255, 255, 0.07);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.02);
+}
+
+.tool-group__title {
+  font-size: 12px;
+  font-weight: 600;
+  color: #cdd3dc;
+  margin-bottom: 8px;
+}
+
+.tool-note {
+  margin: 0 0 8px;
+  font-size: 11px;
+  color: #7b828f;
+}
+
+.vec-input {
+  display: flex;
+  gap: 6px;
+}
+
+.vec-input__field {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex: 1;
+  min-width: 0;
+}
+
+.vec-input__field span {
+  font-size: 11px;
+  color: #7b828f;
+}
+
+.vec-input__field input {
+  width: 100%;
+  min-width: 0;
+  padding: 5px 6px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 6px;
+  font: inherit;
+  font-size: 12px;
+  color: #cdd3dc;
+  background: rgba(0, 0, 0, 0.28);
+}
+
+.vec-input__field input:focus-visible {
+  outline: none;
+  border-color: #7aa2ff;
 }
 
 .slider {

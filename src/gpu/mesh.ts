@@ -1,39 +1,26 @@
-import { load } from '@loaders.gl/core'
-import { PLYLoader } from '@loaders.gl/ply'
 import { mat4 } from 'wgpu-matrix'
 import meshShader from '../shaders/mesh.wgsl?raw'
 import type { FrameContext } from './useWebGPU'
 import { DEPTH_FORMAT, SAMPLE_COUNT } from './useWebGPU'
+import {
+  setOrbitCamera,
+  type OrbitState,
+  type Projection,
+  type Viewport,
+} from './camera'
+import { buildModelMatrix } from './transform'
+import { createNormalGenerator } from './normals'
+import { createSmoother, type BrushStroke } from './smooth'
+import { createGridRenderer, BG, type GridItem } from './grid'
+import type { MeshData } from './ply'
 
-export type Projection = 'perspective' | 'orthographic'
-
-/** Orbit camera around the origin, in spherical-ish terms. */
-export interface OrbitState {
-  azimuth: number // radians, around +Y
-  polar: number // radians, tilt up/down (clamp to avoid gimbal flip)
-  radius: number // distance from target
-}
-
-export const DEFAULT_ORBIT: OrbitState = {
-  azimuth: 0.6,
-  polar: 0.5,
-  radius: 4.5,
-}
-
-export interface MeshData {
-  /** Interleaved position(xyz) + normal(xyz), 6 floats per vertex. */
-  vertices: Float32Array
-  indices: Uint32Array
-  vertexCount: number
-}
-
-/** A framebuffer-pixel rectangle, origin at the top-left of the canvas. */
-export interface Viewport {
-  x: number
-  y: number
-  width: number
-  height: number
-}
+// Public API re-exports so consumers keep importing from './gpu/mesh'.
+export type { Projection, OrbitState, Viewport } from './camera'
+export { DEFAULT_ORBIT } from './camera'
+export type { GridItem } from './grid'
+export type { MeshData } from './ply'
+export type { BrushStroke } from './smooth'
+export { loadPLY, computeVertexNormalsCPU } from './ply'
 
 /** One mesh drawn into one viewport with a chosen projection. */
 export interface SceneItem {
@@ -43,15 +30,21 @@ export interface SceneItem {
   orbit: OrbitState
   /** World-space translation applied to the model (e.g. to stack jaws). */
   offset: [number, number, number]
+  /** Euler rotation in radians, applied X→Y→Z (Three.js "XYZ" order). */
+  rotation: [number, number, number]
+  /** Per-axis scale applied to the model. */
+  scale: [number, number, number]
   /** Material base color (albedo), linear rgb in 0..1. */
   color: [number, number, number]
   metallic: number
   roughness: number
 }
 
-/** GPU-resident buffers for a single mesh. */
+/** GPU-resident buffers for a single mesh. Positions + normals live in
+ *  separate buffers so a compute pass can (re)write normals in place. */
 export interface GpuMesh {
-  vertexBuffer: GPUBuffer
+  positionBuffer: GPUBuffer
+  normalBuffer: GPUBuffer
   indexBuffer: GPUBuffer
   indexCount: number
   destroy(): void
@@ -60,108 +53,40 @@ export interface GpuMesh {
 export interface Renderer {
   createMesh(data: MeshData): GpuMesh
   /** Clears the whole canvas, then draws each item into its viewport. */
-  render(frame: FrameContext, items: SceneItem[]): void
+  render(frame: FrameContext, items: SceneItem[], grids: GridItem[]): void
+  /** viewProj * model for `item`, written into `out` (for screen-space picking). */
+  mvpForItem(item: SceneItem, out: Float32Array): void
+  /** Applies one screen-space smoothing stroke, then regenerates normals. */
+  smooth(mesh: GpuMesh, stroke: BrushStroke): void
 }
 
-const STRIDE = 6 * 4 // 6 floats per vertex
-const UNIFORM_SIZE = (2 * 16 + 3 * 4) * 4 // two mat4x4f + three vec4f
+/** Persistent per-mesh buffers used by the smoothing + normal passes. */
+interface MeshExtra {
+  csrOffsetBuffer: GPUBuffer
+  csrFaceBuffer: GPUBuffer
+  posScratch: GPUBuffer
+  faceCount: number
+  vertexCount: number
+}
 
-/**
- * Fetches/reads + parses a PLY source (URL or uploaded File) into an
- * interleaved, render-ready mesh. Positions are recentered on the origin and
- * scaled to a unit-ish size, and per-vertex normals are computed
- * (area-weighted) since the source files have none.
- */
-export async function loadPLY(source: string | Blob): Promise<MeshData> {
-  const data = await load(source, PLYLoader)
+const POS_STRIDE = 3 * 4 // vec3 positions, tightly packed
+const NORMAL_STRIDE = 3 * 4 // vec3 normals, tightly packed
+// Per-draw transform: two mat4x4f + camPos vec4f. Rewritten every frame.
+const TRANSFORM_SIZE = (2 * 16 + 4) * 4
+// Per-material: base vec4f + pbr vec4f. Rewritten only when the material changes.
+const MATERIAL_SIZE = 2 * 4 * 4
 
-  const position = data.attributes?.POSITION?.value
-  if (!position) throw new Error('PLY has no POSITION attribute')
-  const src =
-    position instanceof Float32Array ? position : new Float32Array(position)
-
-  const rawIndices = data.indices?.value
-  if (!rawIndices) throw new Error('PLY has no face indices')
-  const indices =
-    rawIndices instanceof Uint32Array ? rawIndices : new Uint32Array(rawIndices)
-
-  const vertexCount = src.length / 3
-
-  // --- Recenter + rescale positions to fit a ~1.6 unit box ---
-  const min = [Infinity, Infinity, Infinity]
-  const max = [-Infinity, -Infinity, -Infinity]
-  for (let i = 0; i < src.length; i += 3) {
-    for (let a = 0; a < 3; a++) {
-      const v = src[i + a]
-      if (v < min[a]) min[a] = v
-      if (v > max[a]) max[a] = v
-    }
-  }
-  const center = [
-    (min[0] + max[0]) / 2,
-    (min[1] + max[1]) / 2,
-    (min[2] + max[2]) / 2,
-  ]
-  const extent = Math.max(max[0] - min[0], max[1] - min[1], max[2] - min[2])
-  const scale = extent > 0 ? 1.6 / extent : 1
-
-  const positions = new Float32Array(src.length)
-  for (let i = 0; i < src.length; i += 3) {
-    positions[i] = (src[i] - center[0]) * scale
-    positions[i + 1] = (src[i + 1] - center[1]) * scale
-    positions[i + 2] = (src[i + 2] - center[2]) * scale
-  }
-
-  // --- Area-weighted vertex normals from face normals ---
-  const normals = new Float32Array(src.length)
-  for (let f = 0; f < indices.length; f += 3) {
-    const i0 = indices[f] * 3
-    const i1 = indices[f + 1] * 3
-    const i2 = indices[f + 2] * 3
-
-    const e1x = positions[i1] - positions[i0]
-    const e1y = positions[i1 + 1] - positions[i0 + 1]
-    const e1z = positions[i1 + 2] - positions[i0 + 2]
-    const e2x = positions[i2] - positions[i0]
-    const e2y = positions[i2 + 1] - positions[i0 + 1]
-    const e2z = positions[i2 + 2] - positions[i0 + 2]
-
-    // Cross product; magnitude ∝ triangle area, so this weights by area.
-    const nx = e1y * e2z - e1z * e2y
-    const ny = e1z * e2x - e1x * e2z
-    const nz = e1x * e2y - e1y * e2x
-
-    for (const idx of [i0, i1, i2]) {
-      normals[idx] += nx
-      normals[idx + 1] += ny
-      normals[idx + 2] += nz
-    }
-  }
-  for (let i = 0; i < normals.length; i += 3) {
-    const len = Math.hypot(normals[i], normals[i + 1], normals[i + 2]) || 1
-    normals[i] /= len
-    normals[i + 1] /= len
-    normals[i + 2] /= len
-  }
-
-  // --- Interleave ---
-  const vertices = new Float32Array(vertexCount * 6)
-  for (let v = 0; v < vertexCount; v++) {
-    vertices[v * 6] = positions[v * 3]
-    vertices[v * 6 + 1] = positions[v * 3 + 1]
-    vertices[v * 6 + 2] = positions[v * 3 + 2]
-    vertices[v * 6 + 3] = normals[v * 3]
-    vertices[v * 6 + 4] = normals[v * 3 + 1]
-    vertices[v * 6 + 5] = normals[v * 3 + 2]
-  }
-
-  return { vertices, indices, vertexCount }
+interface MaterialSlot {
+  buffer: GPUBuffer
+  bindGroup: GPUBindGroup
+  last: { color: readonly number[]; metallic: number; roughness: number } | null
 }
 
 /**
- * Builds the shared pipeline once, then vends per-mesh GPU buffers. All meshes
- * share the vertex layout + shader; each gets its own uniform buffer so it can
- * carry its own camera for its viewport.
+ * Builds the shared mesh pipeline once, then vends per-mesh GPU buffers and
+ * draws the scene. Normal generation is delegated to `normals.ts` and the
+ * ground grid to `grid.ts`; camera + model math live in `camera.ts` /
+ * `transform.ts`.
  */
 export function createRenderer(
   device: GPUDevice,
@@ -174,18 +99,21 @@ export function createRenderer(
     vertex: {
       module,
       entryPoint: 'vs',
+      // Positions and normals come from separate buffers so the normal buffer
+      // can be (re)written by the compute passes independently.
       buffers: [
         {
-          arrayStride: STRIDE,
-          attributes: [
-            { shaderLocation: 0, offset: 0, format: 'float32x3' }, // position
-            { shaderLocation: 1, offset: 3 * 4, format: 'float32x3' }, // normal
-          ],
+          arrayStride: POS_STRIDE,
+          attributes: [{ shaderLocation: 0, offset: 0, format: 'float32x3' }],
+        },
+        {
+          arrayStride: NORMAL_STRIDE,
+          attributes: [{ shaderLocation: 1, offset: 0, format: 'float32x3' }],
         },
       ],
     },
     fragment: { module, entryPoint: 'fs', targets: [{ format }] },
-    primitive: { topology: 'triangle-list', cullMode: 'back' },
+    primitive: { topology: 'triangle-list', cullMode: 'none' },
     depthStencil: {
       format: DEPTH_FORMAT,
       depthWriteEnabled: true,
@@ -194,6 +122,13 @@ export function createRenderer(
     multisample: { count: SAMPLE_COUNT },
   })
 
+  const normals = createNormalGenerator(device)
+  const smoother = createSmoother(device)
+  const grid = createGridRenderer(device, format)
+
+  // Persistent buffers the smoothing/normal passes reuse, keyed by mesh.
+  const extras = new WeakMap<GpuMesh, MeshExtra>()
+
   // Scratch matrices reused across items/frames.
   const proj = mat4.create()
   const view = mat4.create()
@@ -201,53 +136,131 @@ export function createRenderer(
   const model = mat4.create()
   const mvp = mat4.create()
   const invView = mat4.create()
-  // 2 mat4 (32) + base(4) + camPos(4) + material(4)
-  const uniformData = new Float32Array(44)
+  const transformData = new Float32Array(36) // mvp(16) + model(16) + camPos(4)
+  const materialData = new Float32Array(8) // base(4) + pbr(4)
+
+  // Per-mesh material buffer + bind group (group 1), rewritten only on change.
+  const materials = new WeakMap<GpuMesh, MaterialSlot>()
 
   const createMesh = (data: MeshData): GpuMesh => {
-    const vertexBuffer = device.createBuffer({
-      size: data.vertices.byteLength,
-      usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST,
+    const { positions, indices, vertexCount, faceCount, csrOffsets, csrFaces } =
+      data
+
+    const positionBuffer = device.createBuffer({
+      size: positions.byteLength,
+      usage:
+        GPUBufferUsage.VERTEX | GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
     })
-    device.queue.writeBuffer(vertexBuffer, 0, data.vertices)
+    device.queue.writeBuffer(positionBuffer, 0, positions)
+
+    // Normals are produced by the compute passes; no initial upload.
+    const normalBuffer = device.createBuffer({
+      size: vertexCount * 3 * 4,
+      usage:
+        GPUBufferUsage.VERTEX | GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+    })
 
     const indexBuffer = device.createBuffer({
-      size: data.indices.byteLength,
-      usage: GPUBufferUsage.INDEX | GPUBufferUsage.COPY_DST,
+      size: indices.byteLength,
+      usage:
+        GPUBufferUsage.INDEX | GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
     })
-    device.queue.writeBuffer(indexBuffer, 0, data.indices)
+    device.queue.writeBuffer(indexBuffer, 0, indices)
 
-    return {
-      vertexBuffer,
+    // Persistent CSR vertex→faces adjacency, shared by the normal + smoothing
+    // passes (both need to re-run after positions change).
+    const csrOffsetBuffer = device.createBuffer({
+      size: csrOffsets.byteLength,
+      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+    })
+    device.queue.writeBuffer(csrOffsetBuffer, 0, csrOffsets)
+    const csrFaceBuffer = device.createBuffer({
+      size: csrFaces.byteLength,
+      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+    })
+    device.queue.writeBuffer(csrFaceBuffer, 0, csrFaces)
+
+    // Scratch positions the smoothing pass writes before copying back.
+    const posScratch = device.createBuffer({
+      size: positions.byteLength,
+      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC,
+    })
+
+    normals.generate({
+      positionBuffer,
       indexBuffer,
-      indexCount: data.indices.length,
+      normalBuffer,
+      csrOffsetBuffer,
+      csrFaceBuffer,
+      faceCount,
+      vertexCount,
+    })
+
+    // Material buffer + bind group (group 1) live with the mesh; content is
+    // written lazily on the first draw and only again when it changes.
+    const materialBuffer = device.createBuffer({
+      size: MATERIAL_SIZE,
+      usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+    })
+    const materialBindGroup = device.createBindGroup({
+      layout: pipeline.getBindGroupLayout(1),
+      entries: [{ binding: 0, resource: { buffer: materialBuffer } }],
+    })
+
+    const mesh: GpuMesh = {
+      positionBuffer,
+      normalBuffer,
+      indexBuffer,
+      indexCount: indices.length,
       destroy() {
-        vertexBuffer.destroy()
+        positionBuffer.destroy()
+        normalBuffer.destroy()
         indexBuffer.destroy()
+        materialBuffer.destroy()
+        csrOffsetBuffer.destroy()
+        csrFaceBuffer.destroy()
+        posScratch.destroy()
       },
     }
+    materials.set(mesh, {
+      buffer: materialBuffer,
+      bindGroup: materialBindGroup,
+      last: null,
+    })
+    extras.set(mesh, {
+      csrOffsetBuffer,
+      csrFaceBuffer,
+      posScratch,
+      faceCount,
+      vertexCount,
+    })
+    return mesh
   }
 
-  // One uniform buffer + bind group per draw. A mesh can appear in several
+  // One transform buffer + bind group per draw. A mesh can appear in several
   // viewports with different cameras in the same pass, so each draw needs its
-  // own uniform storage — a shared buffer would be clobbered by the last write.
-  const uniformSlots: { buffer: GPUBuffer; bindGroup: GPUBindGroup }[] = []
-  const getUniformSlot = (i: number) => {
-    if (!uniformSlots[i]) {
+  // own transform storage — a shared buffer would be clobbered by the last write.
+  const transformSlots: { buffer: GPUBuffer; bindGroup: GPUBindGroup }[] = []
+  const getTransformSlot = (i: number) => {
+    if (!transformSlots[i]) {
       const buffer = device.createBuffer({
-        size: UNIFORM_SIZE,
+        size: TRANSFORM_SIZE,
         usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
       })
       const bindGroup = device.createBindGroup({
         layout: pipeline.getBindGroupLayout(0),
         entries: [{ binding: 0, resource: { buffer } }],
       })
-      uniformSlots[i] = { buffer, bindGroup }
+      transformSlots[i] = { buffer, bindGroup }
     }
-    return uniformSlots[i]
+    return transformSlots[i]
   }
 
-  const render = (frame: FrameContext, items: SceneItem[]) => {
+  const render = (
+    frame: FrameContext,
+    items: SceneItem[],
+    grids: GridItem[],
+  ) => {
     const { device, encoder, view: colorView, msaaView, depthView } = frame
 
     const pass = encoder.beginRenderPass({
@@ -255,7 +268,7 @@ export function createRenderer(
         {
           view: msaaView,
           resolveTarget: colorView,
-          clearValue: { r: 0.05, g: 0.06, b: 0.08, a: 1 },
+          clearValue: { r: BG.r, g: BG.g, b: BG.b, a: 1 },
           loadOp: 'clear',
           storeOp: 'store',
         },
@@ -276,63 +289,99 @@ export function createRenderer(
         color,
         orbit,
         offset,
+        rotation,
+        scale,
         metallic,
         roughness,
       } = item
-      const aspect = vp.width / vp.height
-      if (projection === 'perspective') {
-        mat4.perspective((50 * Math.PI) / 180, aspect, 0.1, 100, proj)
-      } else {
-        // Tie the ortho box to radius so the wheel zooms in both modes.
-        const halfH = orbit.radius * 0.31
-        const halfW = halfH * aspect
-        mat4.ortho(-halfW, halfW, -halfH, halfH, 0.1, 100, proj)
-      }
-
-      // Orbit view built from rotation matrices: pull back by radius, then
-      // tilt (polar, about X) and spin (azimuth, about Y) around the origin.
-      mat4.identity(view)
-      mat4.translate(view, [0, 0, -orbit.radius], view)
-      mat4.rotateX(view, orbit.polar, view)
-      mat4.rotateY(view, orbit.azimuth, view)
-      mat4.multiply(proj, view, viewProj)
+      setOrbitCamera(proj, view, viewProj, projection, orbit, vp.width / vp.height)
 
       // Camera world position = translation of the inverse view matrix.
       mat4.inverse(view, invView)
 
-      mat4.identity(model)
-      mat4.translate(model, offset, model)
+      buildModelMatrix(model, offset, rotation, scale)
       mat4.multiply(viewProj, model, mvp)
-      uniformData.set(mvp, 0)
-      uniformData.set(model, 16)
-      uniformData[32] = color[0] // base.rgb
-      uniformData[33] = color[1]
-      uniformData[34] = color[2]
-      uniformData[35] = 1
-      uniformData[36] = invView[12] // camPos.xyz
-      uniformData[37] = invView[13]
-      uniformData[38] = invView[14]
-      uniformData[39] = 1
-      uniformData[40] = metallic // material.x
-      uniformData[41] = roughness // material.y
-      uniformData[42] = 0
-      uniformData[43] = 0
 
-      // Per-draw uniform slot so multi-viewport draws don't clobber each other.
-      const slot = getUniformSlot(i)
-      device.queue.writeBuffer(slot.buffer, 0, uniformData)
+      // Per-draw transform (group 0): rewritten every frame.
+      transformData.set(mvp, 0)
+      transformData.set(model, 16)
+      transformData.set(invView.subarray(12, 15), 32) // camPos.xyz
+      transformData[35] = 1
+      const slot = getTransformSlot(i)
+      device.queue.writeBuffer(slot.buffer, 0, transformData)
+
+      // Per-material (group 1): rewrite only when it differs from last frame.
+      const material = materials.get(mesh)!
+      const last = material.last
+      if (
+        !last ||
+        last.metallic !== metallic ||
+        last.roughness !== roughness ||
+        last.color[0] !== color[0] ||
+        last.color[1] !== color[1] ||
+        last.color[2] !== color[2]
+      ) {
+        materialData.set(color, 0) // base.rgb
+        materialData[3] = 1
+        materialData[4] = metallic // pbr.x
+        materialData[5] = roughness // pbr.y
+        device.queue.writeBuffer(material.buffer, 0, materialData)
+        material.last = { color: [...color], metallic, roughness }
+      }
 
       pass.setViewport(vp.x, vp.y, vp.width, vp.height, 0, 1)
       pass.setScissorRect(vp.x, vp.y, vp.width, vp.height)
       pass.setPipeline(pipeline)
       pass.setBindGroup(0, slot.bindGroup)
-      pass.setVertexBuffer(0, mesh.vertexBuffer)
+      pass.setBindGroup(1, material.bindGroup)
+      pass.setVertexBuffer(0, mesh.positionBuffer)
+      pass.setVertexBuffer(1, mesh.normalBuffer)
       pass.setIndexBuffer(mesh.indexBuffer, 'uint32')
       pass.drawIndexed(mesh.indexCount)
     })
 
+    // Grids drawn after the opaque meshes so alpha blends over them / the bg,
+    // and depth-tested so the mesh occludes the grid where it's in front.
+    grid.draw(pass, grids)
+
     pass.end()
   }
 
-  return { createMesh, render }
+  // Recompute the same MVP `render` uses for an item — for screen-space picking
+  // outside the render pass (e.g. the smoothing brush). Uses the shared scratch
+  // matrices, safe because it runs between frames, not during `render`.
+  const mvpForItem = (item: SceneItem, out: Float32Array) => {
+    const vp = item.viewport
+    setOrbitCamera(proj, view, viewProj, item.projection, item.orbit, vp.width / vp.height)
+    buildModelMatrix(model, item.offset, item.rotation, item.scale)
+    mat4.multiply(viewProj, model, out)
+  }
+
+  const smooth = (mesh: GpuMesh, stroke: BrushStroke) => {
+    const ex = extras.get(mesh)
+    if (!ex) return
+    smoother.apply(
+      {
+        positionBuffer: mesh.positionBuffer,
+        posScratch: ex.posScratch,
+        csrOffsetBuffer: ex.csrOffsetBuffer,
+        csrFaceBuffer: ex.csrFaceBuffer,
+        indexBuffer: mesh.indexBuffer,
+        vertexCount: ex.vertexCount,
+      },
+      stroke,
+    )
+    // Positions moved, so the shading normals are stale — regenerate them.
+    normals.generate({
+      positionBuffer: mesh.positionBuffer,
+      indexBuffer: mesh.indexBuffer,
+      normalBuffer: mesh.normalBuffer,
+      csrOffsetBuffer: ex.csrOffsetBuffer,
+      csrFaceBuffer: ex.csrFaceBuffer,
+      faceCount: ex.faceCount,
+      vertexCount: ex.vertexCount,
+    })
+  }
+
+  return { createMesh, render, mvpForItem, smooth }
 }

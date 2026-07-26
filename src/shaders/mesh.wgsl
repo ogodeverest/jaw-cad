@@ -1,12 +1,18 @@
-struct Uniforms {
-  mvp : mat4x4f,    // model-view-projection
-  model : mat4x4f,  // world transform (positions + normals)
-  base : vec4f,     // albedo rgb
-  camPos : vec4f,   // camera world position (xyz)
-  material : vec4f, // x: metallic, y: roughness
+// Per-draw: changes every frame (camera + model).
+struct Transform {
+  mvp : mat4x4f,   // model-view-projection
+  model : mat4x4f, // world transform (positions + normals)
+  camPos : vec4f,  // camera world position (xyz)
 };
 
-@group(0) @binding(0) var<uniform> u : Uniforms;
+// Per-material: static per jaw, only rewritten when the material changes.
+struct Material {
+  base : vec4f, // albedo rgb
+  pbr : vec4f,  // x: metallic, y: roughness
+};
+
+@group(0) @binding(0) var<uniform> u : Transform;
+@group(1) @binding(0) var<uniform> m : Material;
 
 const PI = 3.14159265359;
 
@@ -70,9 +76,9 @@ fn fs(in : VSOut) -> @location(0) vec4f {
   let v = normalize(u.camPos.xyz - in.worldPos);
   let nDotV = max(dot(n, v), 0.0001);
 
-  let albedo = u.base.rgb;
-  let metallic = u.material.x;
-  let roughness = clamp(u.material.y, 0.04, 1.0);
+  let albedo = m.base.rgb;
+  let metallic = m.pbr.x;
+  let roughness = clamp(m.pbr.y, 0.04, 1.0);
 
   // Base reflectivity: 0.04 for dielectrics, albedo for metals.
   let f0 = mix(vec3f(0.04), albedo, metallic);
