@@ -1,14 +1,12 @@
-// Per-draw: changes every frame (camera + model).
 struct Transform {
-  mvp : mat4x4f,   // model-view-projection
-  model : mat4x4f, // world transform (positions + normals)
-  camPos : vec4f,  // camera world position (xyz)
+  mvp : mat4x4f,
+  model : mat4x4f,
+  camPos : vec4f,
 };
 
-// Per-material: static per jaw, only rewritten when the material changes.
 struct Material {
-  base : vec4f, // albedo rgb
-  pbr : vec4f,  // x: metallic, y: roughness
+  base : vec4f,
+  pbr : vec4f,
 };
 
 @group(0) @binding(0) var<uniform> u : Transform;
@@ -32,9 +30,6 @@ fn vs(@location(0) p : vec3f, @location(1) n : vec3f) -> VSOut {
   return out;
 }
 
-// --- Cook-Torrance terms ---
-
-// GGX / Trowbridge-Reitz normal distribution.
 fn distributionGGX(nDotH : f32, roughness : f32) -> f32 {
   let a = roughness * roughness;
   let a2 = a * a;
@@ -42,7 +37,6 @@ fn distributionGGX(nDotH : f32, roughness : f32) -> f32 {
   return a2 / (PI * d * d);
 }
 
-// Smith geometry with Schlick-GGX, direct-lighting k.
 fn geometrySchlickGGX(nDotX : f32, roughness : f32) -> f32 {
   let r = roughness + 1.0;
   let k = (r * r) / 8.0;
@@ -58,7 +52,6 @@ fn fresnelSchlick(cosTheta : f32, f0 : vec3f) -> vec3f {
   return f0 + (vec3f(1.0) - f0) * pow(clamp(1.0 - cosTheta, 0.0, 1.0), 5.0);
 }
 
-// Three analytic directional lights: key, fill, rim.
 const LIGHT_DIRS = array<vec3f, 3>(
   vec3f(0.5, 0.8, 0.6),
   vec3f(-0.6, 0.3, -0.4),
@@ -80,7 +73,6 @@ fn fs(in : VSOut) -> @location(0) vec4f {
   let metallic = m.pbr.x;
   let roughness = clamp(m.pbr.y, 0.04, 1.0);
 
-  // Base reflectivity: 0.04 for dielectrics, albedo for metals.
   let f0 = mix(vec3f(0.04), albedo, metallic);
 
   var lo = vec3f(0.0);
@@ -99,8 +91,6 @@ fn fs(in : VSOut) -> @location(0) vec4f {
 
     let specular = (ndf * g * f) / (4.0 * nDotV * nDotL + 0.0001);
 
-    // Energy conservation: diffuse only from refracted (non-reflected),
-    // and metals have no diffuse.
     let kd = (vec3f(1.0) - f) * (1.0 - metallic);
 
     lo += (kd * albedo / PI + specular) * radiance * nDotL;
@@ -109,8 +99,7 @@ fn fs(in : VSOut) -> @location(0) vec4f {
   let ambient = vec3f(0.03) * albedo;
   var color = ambient + lo;
 
-  // Reinhard tone map + gamma.
   color = color / (color + vec3f(1.0));
   color = pow(color, vec3f(1.0 / 2.2));
-  return vec4f(color, 1.0);
+  return vec4f(1.0, 0.0, 0.0, 1.0);
 }

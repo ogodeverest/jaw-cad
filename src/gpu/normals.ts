@@ -1,91 +1,107 @@
-import faceNormalsShader from '../shaders/faceNormals.wgsl?raw'
-import vertexNormalsShader from '../shaders/vertexNormals.wgsl?raw'
+import faceNormalsShader from "../shaders/faceNormals.wgsl?raw";
+import vertexNormalsShader from "../shaders/vertexNormals.wgsl?raw";
 
-const WG_SIZE = 64 // must match @workgroup_size in the normal shaders
+const WG_SIZE = 64; // matches @workgroup_size in the compute shaders
 
-/** Buffers the normal passes read from and the target they write to. */
 export interface NormalTargets {
-  positionBuffer: GPUBuffer
-  indexBuffer: GPUBuffer
-  /** Destination — filled with per-vertex normals (3 floats per vertex). */
-  normalBuffer: GPUBuffer
-  /** Persistent CSR vertex→faces adjacency (owned by the caller). */
-  csrOffsetBuffer: GPUBuffer
-  csrFaceBuffer: GPUBuffer
-  faceCount: number
-  vertexCount: number
+  positionBuffer: GPUBuffer;
+  indexBuffer: GPUBuffer;
+  normalBuffer: GPUBuffer;
+  csrOffsetBuffer: GPUBuffer;
+  csrFaceBuffer: GPUBuffer;
+  faceCount: number;
+  vertexCount: number;
 }
 
 export interface NormalGenerator {
-  /** Runs the two-pass CSR gather to (re)compute `normalBuffer` on the GPU. */
-  generate(targets: NormalTargets): void
+  generate(targets: NormalTargets): void;
 }
 
-/**
- * Builds the face- and vertex-normal compute pipelines once, then vends a
- * `generate` that computes area-weighted vertex normals for a mesh:
- *   pass 1 (per triangle) → un-normalized face normals,
- *   pass 2 (per vertex)   → gather incident faces via CSR, sum, normalize.
- */
+//  pass 1 (per triangle): un-normalized face normals,
+//  pass 2 (per vertex): gather incident faces via CSR, sum, normalize, (average)
 export function createNormalGenerator(device: GPUDevice): NormalGenerator {
+  // create compute pipeline for face normal pass
   const facePipeline = device.createComputePipeline({
-    layout: 'auto',
+    layout: "auto",
     compute: {
       module: device.createShaderModule({ code: faceNormalsShader }),
-      entryPoint: 'main',
+      entryPoint: "main",
     },
-  })
+  });
+
+  // create compute pipeline for vertex normal pass
   const vertexPipeline = device.createComputePipeline({
-    layout: 'auto',
+    layout: "auto",
     compute: {
       module: device.createShaderModule({ code: vertexNormalsShader }),
-      entryPoint: 'main',
+      entryPoint: "main",
     },
-  })
+  });
 
   const generate = (t: NormalTargets) => {
-    // Face normals are scratch (freed after the two passes); the CSR adjacency
-    // buffers are persistent and owned by the caller.
+    // create a buffer for face normals: face count * 3 component per vector (x, y, z) * 4bytes per component (32bit)
     const faceNormalBuffer = device.createBuffer({
       size: t.faceCount * 3 * 4,
       usage: GPUBufferUsage.STORAGE,
-    })
+    });
 
+    // bind-group for the face-normal pipeline
     const faceBind = device.createBindGroup({
       layout: facePipeline.getBindGroupLayout(0),
       entries: [
+        // vertex position buffer
         { binding: 0, resource: { buffer: t.positionBuffer } },
+        // vertex index buffer
         { binding: 1, resource: { buffer: t.indexBuffer } },
+        // face normal buffer: this will be where we write face normal
         { binding: 2, resource: { buffer: faceNormalBuffer } },
       ],
-    })
+    });
+
+    // bind group for vertex-normals pipeline
     const vertBind = device.createBindGroup({
       layout: vertexPipeline.getBindGroupLayout(0),
       entries: [
+        // face normals buffer we wrote
         { binding: 0, resource: { buffer: faceNormalBuffer } },
+        // the offset buffer from CSR (holds the boundaries for each vertex)
         { binding: 1, resource: { buffer: t.csrOffsetBuffer } },
+        // the face buffer holds the face indices each vertex touches
         { binding: 2, resource: { buffer: t.csrFaceBuffer } },
+        // this is the vertex normal buffer we will write into
         { binding: 3, resource: { buffer: t.normalBuffer } },
       ],
-    })
+    });
 
-    // Two separate passes so pass 1's writes are visible to pass 2.
-    const encoder = device.createCommandEncoder()
-    const p1 = encoder.beginComputePass()
-    p1.setPipeline(facePipeline)
-    p1.setBindGroup(0, faceBind)
-    p1.dispatchWorkgroups(Math.ceil(t.faceCount / WG_SIZE))
-    p1.end()
-    const p2 = encoder.beginComputePass()
-    p2.setPipeline(vertexPipeline)
-    p2.setBindGroup(0, vertBind)
-    p2.dispatchWorkgroups(Math.ceil(t.vertexCount / WG_SIZE))
-    p2.end()
-    device.queue.submit([encoder.finish()])
+    // Two separate passes so pass 1 writes are visible to pass 2
+    // create command encoder
+    const encoder = device.createCommandEncoder();
+    const p1 = encoder.beginComputePass();
+    // set face pipeline with shader module
+    p1.setPipeline(facePipeline);
+    // set bindgroups with buffers for face normal computations
+    p1.setBindGroup(0, faceBind);
+    // dispatch workgroups which holds WG_SIZE threads  (one thread one face)
+    p1.dispatchWorkgroups(Math.ceil(t.faceCount / WG_SIZE));
+    // end first pass
+    p1.end();
+
+    // second pass
+    const p2 = encoder.beginComputePass();
+    // set vertex pipeline with shader module
+    p2.setPipeline(vertexPipeline);
+    // set bindgroups with buffers for vertex normal computations
+    p2.setBindGroup(0, vertBind);
+    // dispatch workgroups which holds WG_SIZE threads (one thread one vertex)
+    p2.dispatchWorkgroups(Math.ceil(t.vertexCount / WG_SIZE));
+    p2.end();
+    // submit the command buffer to be executed in GPU
+    device.queue.submit([encoder.finish()]);
 
     // Destroy is deferred until the GPU is done with the submitted work.
-    faceNormalBuffer.destroy()
-  }
+    faceNormalBuffer.destroy();
+  };
 
-  return { generate }
+  // return closure
+  return { generate };
 }

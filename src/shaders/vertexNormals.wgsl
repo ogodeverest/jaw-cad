@@ -1,7 +1,3 @@
-// Pass 2 of GPU normal generation: one thread per vertex.
-// Gathers the vertex's incident face normals via CSR adjacency
-// (offsets + faces), sums them, and normalizes — no atomics needed.
-
 @group(0) @binding(0) var<storage, read> faceNormals : array<f32>;
 @group(0) @binding(1) var<storage, read> offsets : array<u32>;
 @group(0) @binding(2) var<storage, read> faces : array<u32>;

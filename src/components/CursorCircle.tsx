@@ -1,9 +1,5 @@
 import { useEffect, useRef } from 'react'
 
-/**
- * The floating brush circle that follows the pointer. Moved via a ref (not
- * React state) to avoid re-rendering on every pointer move.
- */
 export function CursorCircle({ radius }: { radius: number }) {
   const ref = useRef<HTMLDivElement>(null)
   useEffect(() => {
@@ -15,7 +11,7 @@ export function CursorCircle({ radius }: { radius: number }) {
     return () => window.removeEventListener('pointermove', onMove)
   }, [])
 
-  const size = radius * 2 + 4 // +stroke padding
+  const size = radius * 2 + 4
   return (
     <div ref={ref} className="cursor-circle" aria-hidden="true">
       <svg width={size} height={size} viewBox={`0 0 ${size} ${size}`}>

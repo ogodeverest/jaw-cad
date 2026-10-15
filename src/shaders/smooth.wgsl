@@ -1,15 +1,9 @@
-// Screen-space smoothing brush: one thread per vertex.
-// Projects the vertex through the viewport's MVP, and if it lands inside the
-// brush circle (framebuffer px, y-down), moves it toward the average of its
-// neighbours (uniform Laplacian). Reads from posIn, writes posOut, so a single
-// step never sees a half-updated neighbourhood; the caller copies posOut back.
-
 struct Params {
   mvp : mat4x4f,
-  center : vec2f,   // circle center, framebuffer px relative to the viewport
-  viewport : vec2f, // viewport size in px (w, h)
-  radius : f32,     // circle radius in px
-  lambda : f32,     // smoothing strength, 0..1 per step
+  center : vec2f,
+  viewport : vec2f,
+  radius : f32,
+  lambda : f32,
 };
 
 @group(0) @binding(0) var<storage, read> posIn : array<f32>;
@@ -34,14 +28,12 @@ fn main(@builtin(global_invocation_id) gid : vec3u) {
   let p = getPos(v);
   var outP = p;
 
-  // Project to the viewport's screen space and test against the brush circle.
   let clip = params.mvp * vec4f(p, 1.0);
   if (clip.w > 0.0) {
     let ndc = clip.xy / clip.w;
     let px = (ndc.x * 0.5 + 0.5) * params.viewport.x;
-    let py = (1.0 - (ndc.y * 0.5 + 0.5)) * params.viewport.y; // NDC +y is up
+    let py = (1.0 - (ndc.y * 0.5 + 0.5)) * params.viewport.y;
     if (distance(vec2f(px, py), params.center) <= params.radius) {
-      // Uniform Laplacian: average the incident faces' other two vertices.
       var sum = vec3f(0.0);
       var count = 0u;
       let start = offsets[v];

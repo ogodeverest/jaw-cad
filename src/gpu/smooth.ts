@@ -3,29 +3,29 @@ import smoothShader from '../shaders/smooth.wgsl?raw'
 const WG_SIZE = 64 // must match @workgroup_size in smooth.wgsl
 const PARAMS_FLOATS = 24 // mat4(16) + center(2) + viewport(2) + radius + lambda + pad(2)
 
-/** One screen-space brush stroke against a single mesh in one viewport. */
+// one screen-space brush stroke against a single mesh in one viewport
 export interface BrushStroke {
-  /** viewProj * model for the mesh in the target viewport. */
+  // viewProj * model for the mesh in the target viewport
   mvp: Float32Array
-  /** Target viewport size in framebuffer px. */
+  // target viewport size in framebuffer px
   viewportW: number
   viewportH: number
-  /** Circle center in framebuffer px, relative to the viewport origin (y-down). */
+  // circle center in framebuffer px, relative to the viewport origin (y-down)
   centerX: number
   centerY: number
-  /** Circle radius in framebuffer px. */
+  // circle radius in framebuffer px
   radius: number
-  /** Smoothing strength per step, 0..1. */
+  // smoothing strength per step, 0..1
   lambda: number
 }
 
-/** Buffers the smoothing pass reads from / writes to for one mesh. */
+// buffers the smoothing pass reads from / writes to for one mesh
 export interface SmoothTargets {
-  /** Live vertex positions (read as input, overwritten with the result). */
+  // live vertex positions (read as input, overwritten with the result)
   positionBuffer: GPUBuffer
-  /** Scratch position buffer (STORAGE | COPY_SRC), same size as positions. */
+  // scratch position buffer (STORAGE | COPY_SRC), same size as positions
   posScratch: GPUBuffer
-  /** CSR vertex→faces adjacency (persistent GPU buffers). */
+  // CSR vertex-faces adjacency (persistent gpu buffers)
   csrOffsetBuffer: GPUBuffer
   csrFaceBuffer: GPUBuffer
   indexBuffer: GPUBuffer
@@ -36,11 +36,13 @@ export interface Smoother {
   apply(targets: SmoothTargets, stroke: BrushStroke): void
 }
 
-/**
- * Builds the smoothing compute pipeline once, then vends `apply`, which runs one
- * Laplacian step over the vertices under the brush circle and copies the result
- * back into `positionBuffer`. Callers should re-run normal generation after.
- */
+// builds the smoothing compute pipeline once, then hands back apply()
+// apply() projects every vertex through the given mvp, tests it against the brush
+// circle in screen space, and if inside, moves it toward the average of its
+// neighbours (one laplacian step) - all done in smooth.wgsl in a single dispatch
+// results go to a scratch buffer first (so threads never read each other's
+// half-updated positions), then get copied back over positionBuffer
+// normals are stale after this, caller has to regenerate them
 export function createSmoother(device: GPUDevice): Smoother {
   const pipeline = device.createComputePipeline({
     layout: 'auto',
@@ -50,7 +52,7 @@ export function createSmoother(device: GPUDevice): Smoother {
     },
   })
 
-  // One reusable uniform buffer + CPU staging array; strokes submit in order.
+  // one reusable uniform buffer + CPU staging array, strokes submit in order
   const paramsBuffer = device.createBuffer({
     size: PARAMS_FLOATS * 4,
     usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
@@ -85,7 +87,7 @@ export function createSmoother(device: GPUDevice): Smoother {
     pass.setBindGroup(0, bind)
     pass.dispatchWorkgroups(Math.ceil(t.vertexCount / WG_SIZE))
     pass.end()
-    // Copy the smoothed positions back over the live buffer.
+    // copy the smoothed positions back over the live buffer
     encoder.copyBufferToBuffer(
       t.posScratch,
       0,

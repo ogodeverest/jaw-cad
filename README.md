@@ -1,32 +1,27 @@
-# React + TypeScript + Vite
+# jaw-scan-cad
 
-This template provides a minimal setup to get React working in Vite with HMR and some Oxlint rules.
+A small WebGPU viewer for intraoral (dental) scans. Load an upper and lower jaw,
+look at them from a few angles, change the material, and smooth rough spots with
+a brush.
 
-Currently, two official plugins are available:
+## Sample models
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
+A couple of `.ply` files live under `src/models/` if you want something to load:
 
-## React Compiler
+- `intra-oral/upper.ply` and `intra-oral/lower.ply` — a real scan split into the two jaws
+- `dragon.ply` — not a jaw, just handy for testing the renderer
 
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
+Click **Upload .ply** under Upper jaw / Lower jaw and pick one. Only `.ply` is accepted.
 
-## Expanding the Oxlint configuration
+## What you can do
 
-If you are developing a production application, we recommend enabling type-aware lint rules by installing `oxlint-tsgolint` and editing `.oxlintrc.json`:
+- Load an upper and a lower jaw separately, and show/hide each.
+- Orbit by dragging inside a viewport, zoom with the scroll wheel.
+- Switch projection per jaw (perspective / orthographic).
+- Pick a material — sand, blue resin, gum, gold, silver, chrome, jade.
+- Transform the selected jaw: translation, rotation (in degrees), scale, plus a reset.
+- Smooth with the brush: turn it on, set a radius, then drag over the mesh. It
+  smooths whatever lands inside the circle on screen.
 
-```json
-{
-  "$schema": "./node_modules/oxlint/configuration_schema.json",
-  "plugins": ["react", "typescript", "oxc"],
-  "options": {
-    "typeAware": true
-  },
-  "rules": {
-    "react/rules-of-hooks": "error",
-    "react/only-export-components": ["warn", { "allowConstantExport": true }]
-  }
-}
-```
-
-See the [Oxlint rules documentation](https://oxc.rs/docs/guide/usage/linter/rules) for the full list of rules and categories.
+The visible jaws stack on the left (lower looking down from above, upper looking
+up from below), with a combined perspective view on the right.

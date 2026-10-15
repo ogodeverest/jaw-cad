@@ -1,54 +1,60 @@
+// Extend base Error class to WebGPUUnsupportedError for branching
 export class WebGPUUnsupportedError extends Error {
   constructor(message: string) {
-    super(message)
-    this.name = 'WebGPUUnsupportedError'
+    super(message);
+    this.name = "WebGPUUnsupportedError";
   }
 }
 
+// What we return from the initWebGPU function
+// device: logical device, allows us to create buffers, textures, pipeline, shader modules etc
+// adapter: represents a specific physical GPU (limits, capabilities, features) (not included)
+// context: canvas context
+// format: texture format our device supports for rendering (most of the time bgra-8bit on desktops, pixel-format of swap-chain/canvas where we render into)
+// canvas: canvas element
 export interface GPUContext {
-  device: GPUDevice
-  context: GPUCanvasContext
-  /** Preferred swap-chain format for the current platform, e.g. "bgra8unorm". */
-  format: GPUTextureFormat
-  canvas: HTMLCanvasElement
+  device: GPUDevice;
+  context: GPUCanvasContext;
+  format: GPUTextureFormat;
+  canvas: HTMLCanvasElement;
 }
 
-/**
- * Requests an adapter + device and configures the canvas' WebGPU context.
- * Throws {@link WebGPUUnsupportedError} when WebGPU is unavailable so callers
- * can show a friendly fallback.
- */
+// this function handles the requesting of adapter, device as well as returns canvas, webgpu context and the expected texture format for rendering
+// also configures the webgpu context with device, format and alphaMode
 export async function initWebGPU(
   canvas: HTMLCanvasElement,
 ): Promise<GPUContext> {
-  if (!('gpu' in navigator)) {
-    throw new WebGPUUnsupportedError(
-      'WebGPU is not supported in this browser. Try a recent version of Chrome, Edge, or Safari.',
-    )
+  if (!("gpu" in navigator)) {
+    throw new WebGPUUnsupportedError("WebGPU isn't available in this browser");
   }
 
+  // request adapter: high-performance asks for discrete GPU not the integrated one
   const adapter = await navigator.gpu.requestAdapter({
-    powerPreference: 'high-performance',
-  })
+    powerPreference: "high-performance",
+  });
+
   if (!adapter) {
-    throw new WebGPUUnsupportedError(
-      'No suitable GPU adapter found. WebGPU may be disabled or unavailable on this hardware.',
-    )
+    throw new WebGPUUnsupportedError("No GPU adapter available.");
   }
 
-  const device = await adapter.requestDevice()
+  // requests device the logical device
+  const device = await adapter.requestDevice();
 
-  const context = canvas.getContext('webgpu')
+  const context = canvas.getContext("webgpu");
   if (!context) {
-    throw new WebGPUUnsupportedError('Failed to acquire a WebGPU canvas context.')
+    throw new WebGPUUnsupportedError("Couldn't get a webgpu canvas context.");
   }
 
-  const format = navigator.gpu.getPreferredCanvasFormat()
+  // preferred swapchain texture format, getting this the same as what the device expects
+  // will avoid another pass to swap color channels (better performance)
+  const format = navigator.gpu.getPreferredCanvasFormat();
   context.configure({
     device,
     format,
-    alphaMode: 'opaque',
-  })
+    // canvas alpha channel is ignored, renders as opaque on top of the other HTML
+    alphaMode: "opaque",
+  });
 
-  return { device, context, format, canvas }
+  // return GPUContext
+  return { device, context, format, canvas };
 }

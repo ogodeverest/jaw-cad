@@ -1,7 +1,3 @@
-// Pass 1 of GPU normal generation: one thread per triangle.
-// Writes an un-normalized face normal (length ∝ area) so pass 2's sum is
-// area-weighted, matching the CPU reference.
-
 @group(0) @binding(0) var<storage, read> positions : array<f32>;
 @group(0) @binding(1) var<storage, read> indices : array<u32>;
 @group(0) @binding(2) var<storage, read_write> faceNormals : array<f32>;
